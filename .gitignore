@@ -3,3 +3,5 @@
 /render_derive/target/
 /.gdb_history
 /Cargo.lock
+/*.otf
+/*.ttf
