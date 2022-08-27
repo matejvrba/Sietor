@@ -10,7 +10,7 @@ use syntect::highlighting::ThemeSet;
 use syntect::parsing::SyntaxSet;
 
 /// struct resposible for rendering text and decoration
-pub struct Rend<'a> {
+pub struct Renderer<'a> {
     font: Font<'a>,
     cache: Cache<'a>,
     cache_tex: Texture2d,
@@ -23,7 +23,7 @@ pub struct Rend<'a> {
     ps: SyntaxSet,
 }
 
-impl<'a> Rend<'_> {
+impl<'a> Renderer<'_> {
     pub fn new(win: &window::WindowContext) -> Result<Self, failure::Error> {
         trace!("Initializing syntect");
         let ps = SyntaxSet::load_defaults_newlines();
@@ -122,7 +122,7 @@ void main() {
                         "
         })?;
 
-        Ok(Rend {
+        Ok(Self {
             ps,
             font,
             cache,

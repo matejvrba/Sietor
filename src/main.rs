@@ -21,7 +21,7 @@ use crate::debug::failure_to_string;
 
 mod buffer;
 mod debug;
-mod rend;
+mod renderer;
 mod window;
 
 enum State {
@@ -56,7 +56,7 @@ impl App {
         trace!("Opening a window");
         let win = window::WindowContext::new("Sietor").map_err(err_msg)?;
         let disp = win.display.clone();
-        let mut rend = rend::Rend::new(&win)?;
+        let mut rend = renderer::Renderer::new(&win)?;
 
         let text: String = "
 mod window;
