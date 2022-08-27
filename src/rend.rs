@@ -16,6 +16,7 @@ pub struct Rend<'a> {
     cache_tex: Texture2d,
     program: Program,
     ts: ThemeSet,
+    ps: SyntaxSet,
 }
 
 impl<'a> Rend<'_> {
@@ -23,10 +24,10 @@ impl<'a> Rend<'_> {
         trace!("Initializing syntect");
         let ps = SyntaxSet::load_defaults_newlines();
         let ts = ThemeSet::load_defaults();
-        let _syntax = ps.find_syntax_by_extension("rs").unwrap();
+        //let _syntax = ps.find_syntax_by_extension("rs").unwrap();
 
-        trace!("Loading font \"../TerminusTTF.ttf\"");
-        let font_path = std::env::current_dir().unwrap().join("TerminusTTF.ttf");
+        trace!("Loading font \"/usr/share/fonts/TTF/Hack-Regular.ttf\"");
+        let font_path = std::env::current_dir().unwrap().join("/usr/share/fonts/TTF/Hack-Regular.ttf");
         let data = std::fs::read(&font_path).unwrap();
         let font = Font::try_from_vec(data).unwrap();
 
@@ -54,35 +55,36 @@ impl<'a> Rend<'_> {
         &win.display,
         140 => {
             vertex: "
-                #version 140
+#version 140
 
-                in vec2 position;
-                in vec2 tex_coords;
-                in vec4 colour;
+in vec2 position;
+in vec2 tex_coords;
+in vec4 colour;
 
-                out vec2 v_tex_coords;
-                out vec4 v_colour;
+out vec2 v_tex_coords;
+out vec4 v_colour;
 
-                void main() {
-                    gl_Position = vec4(position, 0.0, 1.0);
-                    v_tex_coords = tex_coords;
-                    v_colour = colour;
-                }
+void main() {
+    gl_Position = vec4(position, 0.0, 1.0);
+    v_tex_coords = tex_coords;
+    v_colour = colour;
+}
             ",
             fragment: "
-                #version 140
-                uniform sampler2D tex;
-                in vec2 v_tex_coords;
-                in vec4 v_colour;
-                out vec4 f_colour;
+#version 140
+uniform sampler2D tex;
+in vec2 v_tex_coords;
+in vec4 v_colour;
+out vec4 f_colour;
 
-                void main() {
-                    f_colour = v_colour * vec4(1.0, 1.0, 1.0, texture(tex, v_tex_coords).r);
-                }
-            "
+void main() {
+    f_colour = vec4(v_colour.rgb, texture(tex, v_tex_coords).r);
+}
+                        "
         })?;
 
         Ok(Rend {
+            ps,
             font,
             cache,
             cache_tex,
@@ -92,48 +94,57 @@ impl<'a> Rend<'_> {
     }
 
     fn layout_paragraph(
+        &self,
         font: &Font<'a>,
         scale: Scale,
         width: u32,
         text: &Vec<String>,
-    ) -> Vec<PositionedGlyph<'a>> {
+    ) -> Vec<(PositionedGlyph<'a>, syntect::highlighting::Style)> {
+
+let syntax = self.ps.find_syntax_by_extension("rs").unwrap();
+let mut highlight = syntect::easy::HighlightLines::new(syntax, &self.ts.themes["InspiredGitHub"]);
+
         let mut result = Vec::new();
         let v_metrics = font.v_metrics(scale);
         let advance_height = v_metrics.ascent - v_metrics.descent + v_metrics.line_gap;
         let mut caret = point(0.0, v_metrics.ascent);
         let mut last_glyph_id = None;
-        for line in text {
-            for c in line.chars() {
-                if c.is_control() {
-                    //check if line contains \n - should not contain, [text] should be vector of inidvidual lines
-                    match c {
-                        '\n' => {
-                            caret = point(0.0, caret.y + advance_height);
-                            error!("Line \"{}\" is not separated properly, should be splitted into two", line);
+        for l in text {
+            let line = highlight.highlight_line(l, &self.ps).unwrap();
+            for word in line {
+                let style = word.0;
+                for c in word.1.chars() {
+                    if c.is_control() {
+                        //check if line contains \n - should not contain, [text] should be vector of inidvidual lines
+                        match c {
+                            '\n' => {
+                                caret = point(0.0, caret.y + advance_height);
+                                error!("Line \"{}\" is not separated properly, should be splitted into two", l);
+                            }
+                            '\r' => {
+                                caret = point(0.0, caret.y + advance_height);
+                                error!("Line \"{}\" is not separated properly, should be splitted into two", l);
+                            }
+                            _ => {}
                         }
-                        '\r' => {
+                        continue;
+                    }
+                    let base_glyph = font.glyph(c);
+                    if let Some(id) = last_glyph_id.take() {
+                        caret.x += font.pair_kerning(scale, id, base_glyph.id());
+                    }
+                    last_glyph_id = Some(base_glyph.id());
+                    let mut glyph = base_glyph.scaled(scale).positioned(caret);
+                    if let Some(bb) = glyph.pixel_bounding_box() {
+                        if bb.max.x > width as i32 {
                             caret = point(0.0, caret.y + advance_height);
-                            error!("Line \"{}\" is not separated properly, should be splitted into two", line);
+                            glyph.set_position(caret);
+                            last_glyph_id = None;
                         }
-                        _ => {}
                     }
-                    continue;
+                    caret.x += glyph.unpositioned().h_metrics().advance_width;
+                    result.push((glyph, style));
                 }
-                let base_glyph = font.glyph(c);
-                if let Some(id) = last_glyph_id.take() {
-                    caret.x += font.pair_kerning(scale, id, base_glyph.id());
-                }
-                last_glyph_id = Some(base_glyph.id());
-                let mut glyph = base_glyph.scaled(scale).positioned(caret);
-                if let Some(bb) = glyph.pixel_bounding_box() {
-                    if bb.max.x > width as i32 {
-                        caret = point(0.0, caret.y + advance_height);
-                        glyph.set_position(caret);
-                        last_glyph_id = None;
-                    }
-                }
-                caret.x += glyph.unpositioned().h_metrics().advance_width;
-                result.push(glyph);
             }
             caret = point(0.0, caret.y + advance_height);
         }
@@ -158,15 +169,16 @@ impl<'a> Rend<'_> {
         let scale_dis = disp.gl_window().window().scale_factor();
         let scale_dis = scale_dis as f32;
 
-        let glyphs = Self::layout_paragraph(
+        let glyphs = self.layout_paragraph(
             &self.font,
             Scale::uniform(scale * scale_dis),
             width,
             &buff.buffer,
+
         );
 
         for glyph in &glyphs {
-            self.cache.queue_glyph(0, glyph.clone());
+            self.cache.queue_glyph(0, glyph.0.clone());
         }
 
         self.cache
@@ -201,7 +213,7 @@ impl<'a> Rend<'_> {
             }
 
             implement_vertex!(Vertex, position, tex_coords, colour);
-            let colour = [0.0, 0.0, 0.0, 1.0];
+            let mut colour = [0.0, 0.0, 0.0, 1.0];
             let (screen_width, screen_height) = {
                 let (w, h) = disp.get_framebuffer_dimensions();
                 (w as f32, h as f32)
@@ -209,8 +221,15 @@ impl<'a> Rend<'_> {
             let origin = point(x, y);
             let vertices: Vec<Vertex> = glyphs
                 .iter()
-                .filter_map(|g| self.cache.rect_for(0, g).ok().flatten())
-                .flat_map(|(uv_rect, screen_rect)| {
+                .filter_map(|g| {
+                            match self.cache.rect_for(0, &g.0).ok().flatten() {
+                                Some(rect) => Some((rect, &g.1)),
+                                None => None,
+                            }
+                }
+                )
+                .flat_map(|(rect, style)| {
+                    let (uv_rect, screen_rect) = rect;
                     let gl_rect = Rect {
                         min: origin
                             + (vector(
@@ -223,6 +242,10 @@ impl<'a> Rend<'_> {
                                 1.0 - screen_rect.max.y as f32 / screen_height - 0.5,
                             )) * 2.0,
                     };
+                    colour[0] = style.foreground.r as f32 / 255.0;
+                    colour[1] = style.foreground.g as f32 / 255.0;
+                    colour[2] = style.foreground.b as f32 / 255.0;
+                    colour[3] = style.foreground.a as f32 / 255.0;
                     vec![
                         Vertex {
                             position: [gl_rect.min.x, gl_rect.max.y],
