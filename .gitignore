@@ -1,0 +1,5 @@
+/target
+/lib/gl/target/
+/render_derive/target/
+/.gdb_history
+/Cargo.lock
