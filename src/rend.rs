@@ -9,12 +9,16 @@ use std::borrow::Cow;
 use syntect::highlighting::ThemeSet;
 use syntect::parsing::SyntaxSet;
 
+/// struct resposible for rendering text and decoration
 pub struct Rend<'a> {
     font: Font<'a>,
-    //        win:  &'a WindowContext,
     cache: Cache<'a>,
     cache_tex: Texture2d,
-    program: Program,
+    /// OpenGL texture used for caching of font
+    text_program: Program,
+    ///shader for drwaing text
+    decor_program: Program,
+    ///sjader for drawing solid rectangles
     ts: ThemeSet,
     ps: SyntaxSet,
 }
@@ -27,7 +31,9 @@ impl<'a> Rend<'_> {
         //let _syntax = ps.find_syntax_by_extension("rs").unwrap();
 
         trace!("Loading font \"/usr/share/fonts/TTF/Hack-Regular.ttf\"");
-        let font_path = std::env::current_dir().unwrap().join("/usr/share/fonts/TTF/Hack-Regular.ttf");
+        let font_path = std::env::current_dir()
+            .unwrap()
+            .join("/usr/share/fonts/TTF/Hack-Regular.ttf");
         let data = std::fs::read(&font_path).unwrap();
         let font = Font::try_from_vec(data).unwrap();
 
@@ -51,34 +57,67 @@ impl<'a> Rend<'_> {
         )?;
 
         trace!("Compiling font shader");
-        let program = program!(
+        let text_program = program!(
+        &win.display,
+        140 => {
+            vertex: "
+#version 150
+
+in vec2 position;
+in vec2 tex_coords;
+in vec4 colour;
+
+out VS_OUTPUT{
+    vec2 tex_coords;
+    vec4 colour;
+}OUT;
+
+void main() {
+    gl_Position = vec4(position, 0.0, 1.0);
+    OUT.tex_coords = tex_coords;
+    OUT.colour = colour;
+}
+            ",
+            fragment: "
+#version 150
+uniform sampler2D tex;
+                
+in VS_OUTPUT{
+    vec2 tex_coords;
+    vec4 colour;
+} IN;
+
+out vec4 colour;
+
+void main() {
+    colour = vec4(IN.colour.rgb, texture(tex, IN.tex_coords).r);
+}
+                        "
+        })?;
+
+        let decor_program = program!(
         &win.display,
         140 => {
             vertex: "
 #version 140
 
 in vec2 position;
-in vec2 tex_coords;
 in vec4 colour;
 
-out vec2 v_tex_coords;
 out vec4 v_colour;
 
 void main() {
     gl_Position = vec4(position, 0.0, 1.0);
-    v_tex_coords = tex_coords;
     v_colour = colour;
 }
             ",
             fragment: "
 #version 140
-uniform sampler2D tex;
-in vec2 v_tex_coords;
 in vec4 v_colour;
 out vec4 f_colour;
 
 void main() {
-    f_colour = vec4(v_colour.rgb, texture(tex, v_tex_coords).r);
+    f_colour = v_colour;
 }
                         "
         })?;
@@ -88,7 +127,8 @@ void main() {
             font,
             cache,
             cache_tex,
-            program,
+            text_program,
+            decor_program,
             ts,
         })
     }
@@ -100,9 +140,9 @@ void main() {
         width: u32,
         text: &Vec<String>,
     ) -> Vec<(PositionedGlyph<'a>, syntect::highlighting::Style)> {
-
-let syntax = self.ps.find_syntax_by_extension("rs").unwrap();
-let mut highlight = syntect::easy::HighlightLines::new(syntax, &self.ts.themes["InspiredGitHub"]);
+        let syntax = self.ps.find_syntax_by_extension("rs").unwrap();
+        let mut highlight =
+            syntect::easy::HighlightLines::new(syntax, &self.ts.themes["InspiredGitHub"]);
 
         let mut result = Vec::new();
         let v_metrics = font.v_metrics(scale);
@@ -160,21 +200,36 @@ let mut highlight = syntect::easy::HighlightLines::new(syntax, &self.ts.themes["
         disp: &Display,
         buff: &TextBuffer,
     ) {
+        self.draw_text(x, y, width_factor, height_factor, scale, disp, buff);
+    }
+
+    ///draws text, `x` and `y` is normalized position of top left corner
+    /// `width_factor` and `height_factor` is normalized width and height
+    /// `scale is size of font`
+    fn draw_text(
+        &mut self,
+        x: f32,
+        y: f32,
+        width_factor: f32,
+        height_factor: f32,
+        scale: f32,
+        disp: &Display,
+        buff: &TextBuffer,
+    ) {
+        //get size of window
         let (mut width, mut height): (f32, f32) = disp.gl_window().window().inner_size().into();
         height = height_factor * height;
-        let _height = height.ceil() as u32;
+        let height = height.ceil() as u32;
         width = width_factor * width;
         let width = width.ceil() as u32;
 
-        let scale_dis = disp.gl_window().window().scale_factor();
-        let scale_dis = scale_dis as f32;
+        let scale_dis = disp.gl_window().window().scale_factor() as f32;
 
         let glyphs = self.layout_paragraph(
             &self.font,
             Scale::uniform(scale * scale_dis),
             width,
             &buff.buffer,
-
         );
 
         for glyph in &glyphs {
@@ -221,13 +276,10 @@ let mut highlight = syntect::easy::HighlightLines::new(syntax, &self.ts.themes["
             let origin = point(x, y);
             let vertices: Vec<Vertex> = glyphs
                 .iter()
-                .filter_map(|g| {
-                            match self.cache.rect_for(0, &g.0).ok().flatten() {
-                                Some(rect) => Some((rect, &g.1)),
-                                None => None,
-                            }
-                }
-                )
+                .filter_map(|g| match self.cache.rect_for(0, &g.0).ok().flatten() {
+                    Some(rect) => Some((rect, &g.1)),
+                    None => None,
+                })
                 .flat_map(|(rect, style)| {
                     let (uv_rect, screen_rect) = rect;
                     let gl_rect = Rect {
@@ -290,7 +342,7 @@ let mut highlight = syntect::easy::HighlightLines::new(syntax, &self.ts.themes["
             .draw(
                 &vertex_buffer,
                 glium::index::NoIndices(glium::index::PrimitiveType::TrianglesList),
-                &self.program,
+                &self.text_program,
                 &uniforms,
                 &glium::DrawParameters {
                     blend: glium::Blend::alpha_blending(),
@@ -301,4 +353,6 @@ let mut highlight = syntect::easy::HighlightLines::new(syntax, &self.ts.themes["
 
         target.finish().unwrap();
     }
+    /// draw cursor,...
+    pub fn draw_decoration() {}
 }
