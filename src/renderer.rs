@@ -4,10 +4,110 @@ use glium::*;
 #[allow(unused_imports)]
 use log::{debug, error, info, trace, warn};
 use rusttype::gpu_cache::Cache;
-use rusttype::{point, vector, Font, PositionedGlyph, Rect, Scale};
+use rusttype::{point, vector, Font, PositionedGlyph, Scale};
 use std::borrow::Cow;
 use syntect::highlighting::ThemeSet;
 use syntect::parsing::SyntaxSet;
+
+/// Intented to represent size on screen, can be either normalized (e.g. 0.0 is
+/// center, 1.0 is right and -1.0 is left of screen)
+#[derive(Clone, Copy, Debug)]
+pub enum ScreenSize {
+    Normalized(f32),
+    Px(i32),
+}
+/// Struct representing on screen rectangle
+/// Has `x` and `y` position, `width` and `height`
+/// all values are of type [ScreenSize](ScreenSize) which can be either normalized or absolute
+#[derive(Debug)]
+pub struct Rect {
+    x: ScreenSize,
+    y: ScreenSize,
+    width: ScreenSize,
+    height: ScreenSize,
+}
+
+impl Rect {
+    /// convert coordinate to normalized
+    fn normalize(val: ScreenSize, size: u32) -> f32 {
+        match val {
+            ScreenSize::Normalized(v) => v,
+            ScreenSize::Px(v) => v as f32 / size as f32,
+        }
+    }
+    /// convert coordinate to absoluite
+    fn pxize(val: ScreenSize, size: u32) -> f32 {
+        match val {
+            ScreenSize::Normalized(v) => (v * size as f32),
+            ScreenSize::Px(v) => v as f32,
+        }
+    }
+
+    /// returns tuple containing normalized coordinates (x, y, width, height)
+    pub fn to_noramalized(&self, screen_width: u32, screen_height: u32) -> (f32, f32, f32, f32) {
+        (
+            Self::normalize(self.x, screen_width),
+            Self::normalize(self.y, screen_height),
+            Self::normalize(self.width, screen_width),
+            Self::normalize(self.height, screen_height),
+        )
+    }
+    /// returns tuple containing coordinates converted to pixels (x, y, width, height)
+    pub fn to_px(&self, screen_width: u32, screen_height: u32) -> (f32, f32, f32, f32) {
+        (
+            Self::pxize(self.x, screen_width),
+            Self::pxize(self.y, screen_height),
+            Self::pxize(self.width, screen_width),
+            Self::pxize(self.height, screen_height),
+        )
+    }
+
+    /// normalize all coordinates
+    pub fn self_to_noramalized(&mut self, screen_width: u32, screen_height: u32) {
+        self.x = ScreenSize::Normalized(Self::normalize(self.x, screen_width));
+        self.y = ScreenSize::Normalized(Self::normalize(self.y, screen_height));
+        self.width = ScreenSize::Normalized(Self::normalize(self.width, screen_width));
+        self.height = ScreenSize::Normalized(Self::normalize(self.height, screen_height));
+    }
+    /// convert all values to ScreenSize::Px
+    pub fn self_to_px(&mut self, screen_width: u32, screen_height: u32) {
+        self.x = ScreenSize::Px(Self::pxize(self.x, screen_width) as i32);
+        self.y = ScreenSize::Px(Self::pxize(self.y, screen_height) as i32);
+        self.width = ScreenSize::Px(Self::pxize(self.width, screen_width) as i32);
+        self.height = ScreenSize::Px(Self::pxize(self.height, screen_height) as i32);
+    }
+}
+
+/// Struct for representing RGBA color with normalized values
+pub struct ColorRGBA {
+    r: f32,
+    g: f32,
+    b: f32,
+    a: f32,
+}
+
+impl ColorRGBA {
+    /// returns copy of colors in array `[r, g, b, a]`
+    pub fn as_arr(&self) -> [f32; 4] {
+        [self.r, self.g, self.b, self.a]
+    }
+    /// returns new black color
+    fn new() -> Self {
+        ColorRGBA {
+            r: 0.0,
+            g: 0.0,
+            b: 0.0,
+            a: 1.0,
+        }
+    }
+    fn from_8bit(mut self, r: u8, g: u8, b: u8, a: u8) -> Self {
+        self.r = r as f32 / 255.0;
+        self.g = g as f32 / 255.0;
+        self.b = b as f32 / 255.0;
+        self.a = a as f32 / 255.0;
+        self
+    }
+}
 
 /// struct resposible for rendering text and decoration
 pub struct Renderer<'a> {
@@ -65,17 +165,17 @@ impl<'a> Renderer<'_> {
 
 in vec2 position;
 in vec2 tex_coords;
-in vec4 colour;
+in vec4 color;
 
 out VS_OUTPUT{
     vec2 tex_coords;
-    vec4 colour;
+    vec4 color;
 }OUT;
 
 void main() {
     gl_Position = vec4(position, 0.0, 1.0);
     OUT.tex_coords = tex_coords;
-    OUT.colour = colour;
+    OUT.color = color;
 }
             ",
             fragment: "
@@ -84,13 +184,13 @@ uniform sampler2D tex;
                 
 in VS_OUTPUT{
     vec2 tex_coords;
-    vec4 colour;
+    vec4 color;
 } IN;
 
-out vec4 colour;
+out vec4 color;
 
 void main() {
-    colour = vec4(IN.colour.rgb, texture(tex, IN.tex_coords).r);
+    color = vec4(IN.color.rgb, texture(tex, IN.tex_coords).r);
 }
                         "
         })?;
@@ -102,22 +202,22 @@ void main() {
 #version 140
 
 in vec2 position;
-in vec4 colour;
+in vec4 color;
 
-out vec4 v_colour;
+out vec4 v_color;
 
 void main() {
     gl_Position = vec4(position, 0.0, 1.0);
-    v_colour = colour;
+    v_color = color;
 }
             ",
             fragment: "
 #version 140
-in vec4 v_colour;
-out vec4 f_colour;
+in vec4 v_color;
+out vec4 f_color;
 
 void main() {
-    f_colour = v_colour;
+    f_color = v_color;
 }
                         "
         })?;
@@ -200,7 +300,27 @@ void main() {
         disp: &Display,
         buff: &TextBuffer,
     ) {
-        self.draw_text(x, y, width_factor, height_factor, scale, disp, buff);
+        let mut target = disp.draw();
+        self.draw_text(
+            x,
+            y,
+            width_factor,
+            height_factor,
+            scale,
+            disp,
+            buff,
+            &mut target,
+        );
+        let rect = Rect {
+            x: ScreenSize::Normalized(0.0),
+            y: ScreenSize::Normalized(0.0),
+            width: ScreenSize::Normalized(0.25),
+            height: ScreenSize::Normalized(0.25),
+        };
+        let col = ColorRGBA::new().from_8bit(255, 0, 0, 255);
+        self.draw_rect(&rect, &col, scale, disp, buff, &mut target);
+        self.draw_cursor(buff, scale as u32, scale, disp, &mut target);
+        target.finish().unwrap();
     }
 
     ///draws text, `x` and `y` is normalized position of top left corner
@@ -215,6 +335,7 @@ void main() {
         scale: f32,
         disp: &Display,
         buff: &TextBuffer,
+        target: &mut Frame,
     ) {
         //get size of window
         let (mut width, mut height): (f32, f32) = disp.gl_window().window().inner_size().into();
@@ -264,11 +385,11 @@ void main() {
             struct Vertex {
                 position: [f32; 2],
                 tex_coords: [f32; 2],
-                colour: [f32; 4],
+                color: [f32; 4],
             }
 
-            implement_vertex!(Vertex, position, tex_coords, colour);
-            let mut colour = [0.0, 0.0, 0.0, 1.0];
+            implement_vertex!(Vertex, position, tex_coords, color);
+            let mut color = [0.0, 0.0, 0.0, 1.0];
             let (screen_width, screen_height) = {
                 let (w, h) = disp.get_framebuffer_dimensions();
                 (w as f32, h as f32)
@@ -282,7 +403,7 @@ void main() {
                 })
                 .flat_map(|(rect, style)| {
                     let (uv_rect, screen_rect) = rect;
-                    let gl_rect = Rect {
+                    let gl_rect = rusttype::Rect {
                         min: origin
                             + (vector(
                                 screen_rect.min.x as f32 / screen_width - 0.5,
@@ -294,40 +415,40 @@ void main() {
                                 1.0 - screen_rect.max.y as f32 / screen_height - 0.5,
                             )) * 2.0,
                     };
-                    colour[0] = style.foreground.r as f32 / 255.0;
-                    colour[1] = style.foreground.g as f32 / 255.0;
-                    colour[2] = style.foreground.b as f32 / 255.0;
-                    colour[3] = style.foreground.a as f32 / 255.0;
+                    color[0] = style.foreground.r as f32 / 255.0;
+                    color[1] = style.foreground.g as f32 / 255.0;
+                    color[2] = style.foreground.b as f32 / 255.0;
+                    color[3] = style.foreground.a as f32 / 255.0;
                     vec![
                         Vertex {
                             position: [gl_rect.min.x, gl_rect.max.y],
                             tex_coords: [uv_rect.min.x, uv_rect.max.y],
-                            colour,
+                            color,
                         },
                         Vertex {
                             position: [gl_rect.min.x, gl_rect.min.y],
                             tex_coords: [uv_rect.min.x, uv_rect.min.y],
-                            colour,
+                            color,
                         },
                         Vertex {
                             position: [gl_rect.max.x, gl_rect.min.y],
                             tex_coords: [uv_rect.max.x, uv_rect.min.y],
-                            colour,
+                            color,
                         },
                         Vertex {
                             position: [gl_rect.max.x, gl_rect.min.y],
                             tex_coords: [uv_rect.max.x, uv_rect.min.y],
-                            colour,
+                            color,
                         },
                         Vertex {
                             position: [gl_rect.max.x, gl_rect.max.y],
                             tex_coords: [uv_rect.max.x, uv_rect.max.y],
-                            colour,
+                            color,
                         },
                         Vertex {
                             position: [gl_rect.min.x, gl_rect.max.y],
                             tex_coords: [uv_rect.min.x, uv_rect.max.y],
-                            colour,
+                            color,
                         },
                     ]
                 })
@@ -336,8 +457,7 @@ void main() {
             glium::VertexBuffer::new(disp, &vertices).unwrap()
         };
 
-        let mut target = disp.draw();
-        target.clear_color(1.0, 1.0, 1.0, 0.0);
+        target.clear_color(1.0, 1.0, 1.0, 1.0);
         target
             .draw(
                 &vertex_buffer,
@@ -350,9 +470,112 @@ void main() {
                 },
             )
             .unwrap();
-
-        target.finish().unwrap();
     }
     /// draw cursor,...
-    pub fn draw_decoration() {}
+    pub fn draw_rect(
+        &mut self,
+        rect: &Rect,
+        color: &ColorRGBA,
+        scale: f32,
+        disp: &Display,
+        buff: &TextBuffer,
+        target: &mut Frame,
+    ) {
+        //get size of window
+        let (mut width, mut height): (f32, f32) = disp.gl_window().window().inner_size().into();
+        let (x, y, width_factor, height_factor) =
+            rect.to_noramalized(width.ceil() as u32, height.ceil() as u32);
+        let scale_dis = disp.gl_window().window().scale_factor() as f32;
+        height = height_factor * scale_dis;
+        width = width_factor * scale_dis;
+
+        let vertex_buffer = {
+            #[derive(Copy, Clone)]
+            struct Vertex {
+                position: [f32; 2],
+                color: [f32; 4],
+            }
+
+            implement_vertex!(Vertex, position, color);
+            let (screen_width, screen_height) = {
+                let (w, h) = disp.get_framebuffer_dimensions();
+                (w as f32, h as f32)
+            };
+            let origin = point(x, y);
+            let verts: Vec<Vertex> = vec![
+                Vertex {
+                    position: [x, y],
+                    color: color.as_arr(),
+                },
+                Vertex {
+                    position: [x, height],
+                    color: color.as_arr(),
+                },
+                Vertex {
+                    position: [width, y],
+                    color: color.as_arr(),
+                },
+                Vertex {
+                    position: [x, height],
+                    color: color.as_arr(),
+                },
+                Vertex {
+                    position: [width, y],
+                    color: color.as_arr(),
+                },
+                Vertex {
+                    position: [width, height],
+                    color: color.as_arr(),
+                },
+            ];
+
+            glium::VertexBuffer::new(disp, &verts).unwrap()
+        };
+
+        let uniforms = uniform! {
+            tex: self.cache_tex.sampled().magnify_filter(glium::uniforms::MagnifySamplerFilter::Nearest)
+        };
+        target
+            .draw(
+                &vertex_buffer,
+                glium::index::NoIndices(glium::index::PrimitiveType::TrianglesList),
+                &self.decor_program,
+                &uniforms,
+                &glium::DrawParameters {
+                    blend: glium::Blend::alpha_blending(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+    }
+
+    fn draw_cursor(&mut self, buff: &TextBuffer, size: u32,
+        scale: f32,
+        disp: &Display,
+        target: &mut Frame,
+    ) {
+        let ( scr_width,  scr_height): (f32, f32) = disp.gl_window().window().inner_size().into();
+        let scr_width = (scr_width) as i32;
+        let scr_height = (scr_height) as i32;
+        let x = buff.cursor.text_pos.1 as i32 * size as i32 - scr_width;
+        let y = scr_height - buff.cursor.text_pos.0 as i32 * size as i32 * 2;
+        let width = x + scale as i32 ;
+        let height = y - scale as i32 * 2;
+
+
+        let x = buff.cursor.screen_pos.1 * size as f32;
+        let y = buff.cursor.screen_pos.0 * size as f32;
+        let x = x as i32;
+        let y = y as i32;
+        let width = buff.cursor.screen_width as i32;
+
+        let rect = Rect{
+            x: ScreenSize::Px(x),
+            y: ScreenSize::Px(y),
+            width: ScreenSize::Px(width),
+            height: ScreenSize::Px(height),
+};
+        let col = ColorRGBA::new();
+        self.draw_rect(&rect, &col, scale, disp, buff, target);
+    }
 }

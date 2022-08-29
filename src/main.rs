@@ -23,6 +23,7 @@ mod buffer;
 mod debug;
 mod renderer;
 mod window;
+mod cursor;
 
 enum State {
     Normal,
@@ -41,13 +42,13 @@ fn main() {
     }
 }
 
-struct App {
-    buffers: Vec<TextBuffer>,
+struct App<'a> {
+    buffers: Vec<TextBuffer<'a>>,
     active_buffer: usize,
     state: State,
 }
 
-impl App {
+impl App<'_> {
     fn sietor(mut self) -> Result<(), failure::Error> {
         if cfg!(target_os = "linux") && env::var("WINIT_UNIX_BACKEND").is_err() {
             env::set_var("WINIT_UNIX_BACKEND", "x11");
@@ -71,7 +72,7 @@ fn main() {
 "
         .into();
 
-        let buf = TextBuffer::new(buffer::BufferOrigin::Buffer(text), None, None);
+        let _buf = TextBuffer::new(buffer::BufferOrigin::Buffer(text), None, None);
         win.event_loop.run(move |event, _, control_flow| {
             // ControlFlow::Wait pauses the event loop if no events are available to process.
             // This is ideal for non-game applications that only update in response to user

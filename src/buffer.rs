@@ -1,7 +1,10 @@
-use nalgebra as na;
+use rusttype::Font;
 use std::cmp::{max, min};
 use std::fs;
 use std::io::Read;
+use crate::cursor::{Cursor, Position};
+#[allow(unused_imports)]
+use log::{debug, error, info, trace, warn};
 
 #[cfg(test)]
 mod tests {
@@ -14,13 +17,13 @@ mod tests {
     fn test_new_buffer() {
         let buff = TextBuffer::new(BufferOrigin::Empty, None, None);
         assert_eq!(buff.buffer, Vec::<String>::new());
-        assert_eq!(buff.cursor, (0, 0));
+        assert_eq!(buff.cursor.text_pos, (0, 0));
         assert_eq!(buff.view_pos, (0, 0));
         assert!(buff.file.is_none());
         assert_eq!(buff.buffer_type, BufferType::Clear);
         assert!(buff.file.is_none());
         let buff = TextBuffer::new(BufferOrigin::Empty, Some((1, 2)), Some((3, 4)));
-        assert_eq!(buff.cursor, (1, 2));
+        assert_eq!(buff.cursor.text_pos, (1, 2));
         assert_eq!(buff.view_pos, (3, 4));
         let buff = TextBuffer::new(BufferOrigin::Buffer("test".to_string()), None, None);
         assert_eq!(buff.buffer, vec!["test".to_string()]);
@@ -105,32 +108,40 @@ pub enum Lang {
 }
 
 // File buffer, optionaly tied to file
-pub struct TextBuffer {
+pub struct TextBuffer<'a> {
     pub buffer: Vec<String>,
     pub buffer_type: BufferType,
     ///row and column where curosr is located
-    pub cursor: (usize, usize),
+    pub cursor: Cursor,
     pub view_pos: (usize, usize),
     pub file: Option<fs::File>,
+    font: Font<'a>,
 }
 
-impl TextBuffer {
+impl TextBuffer<'_> {
     pub fn new(
         buffer: BufferOrigin,
         cursor: Option<(usize, usize)>,
         view_pos: Option<(usize, usize)>,
     ) -> Self {
+
+        trace!("Loading font \"/usr/share/fonts/TTF/Hack-Regular.ttf\"");
+        let font_path = std::env::current_dir()
+            .unwrap()
+            .join("/usr/share/fonts/TTF/Hack-Regular.ttf");
+        let data = std::fs::read(&font_path).unwrap();
+        let font = Font::try_from_vec(data).unwrap();
         let mut buf = TextBuffer {
             buffer: Vec::<String>::new(),
             buffer_type: BufferType::Clear,
-            cursor: (0, 0),
+            cursor: Cursor::new(),
             view_pos: (0, 0),
             file: None,
+            font,
         };
 
         if let Some((row, col)) = cursor {
-            buf.cursor.0 = row;
-            buf.cursor.1 = col;
+            buf.cursor.move_to(Position::Absolute(row), Position::Absolute(col), &buf.buffer, &buf.font);
         }
         if let Some((row, col)) = view_pos {
             buf.view_pos.0 = row;
@@ -138,7 +149,7 @@ impl TextBuffer {
         }
 
         match buffer {
-            BufferOrigin::File(mut f) => {
+            BufferOrigin::File(f) => {
                 buf.file = Some(f);
                 let mut buff = String::new();
                 if let Some(ref mut file) = buf.file {
@@ -159,8 +170,7 @@ impl TextBuffer {
     }
 
     pub fn insert(&mut self, ch: char, pos: Option<(usize, usize)>) {
-        let mut row: usize = self.cursor.0;
-        let mut col: usize = self.cursor.1;
+        let (mut row, mut col) =  self.cursor.text_pos;
 
         if let Some((r, c)) = pos {
             row = r;
@@ -174,14 +184,13 @@ impl TextBuffer {
                 self.buffer[row] = right.to_string();
                 self.buffer.insert(row, left.to_string());
                 if let None = pos {
-                    self.cursor.0 += 1;
-                    self.cursor.1 = 0;
+                    self.cursor.move_to(Position::Relative(1), Position::Absolute(0), &self.buffer, &self.font);
                 }
             }
             _ => {
                 self.buffer[row].insert(col, ch);
                 if let None = pos {
-                    self.cursor.1 += 1;
+                    self.cursor.move_to(Position::Absolute(0), Position::Relative(1), &self.buffer, &self.font)
                 }
             }
         }
@@ -192,24 +201,26 @@ impl TextBuffer {
     /// move is past the end of line, it continues on the next line(except for
     /// the end of file, where is stops)
     pub fn move_cursor_absolute(&mut self, vertical: usize, mut horizontal: usize) {
-        self.cursor.0 = min(vertical, self.buffer.len() - 1);
-        let mut line_len = self.buffer[self.cursor.0].len();
+        let mut row = min(vertical, self.buffer.len() - 1);
+        let mut col: usize = 0;
+        let mut line_len = self.buffer[row].len();
         while line_len < horizontal {
-            if self.buffer.len() - 1 == self.cursor.0 {
-                self.cursor.1 = line_len;
+            if self.buffer.len() - 1 == row {
+                col = line_len;
                 return;
             }
             horizontal -= line_len + 1;
-            self.cursor.0 += 1;
-            line_len = self.buffer[self.cursor.0].len();
+            row += 1;
+            line_len = self.buffer[row].len();
         }
-        self.cursor.1 = horizontal;
+        col = horizontal;
+        self.cursor.move_to(Position::Absolute(row), Position::Absolute(col), &self.buffer, &self.font)
     }
 
     /// sets cursor to relative x and y to current position or to the beginning/end of line/buffer
     pub fn move_cursor_relative(&mut self, vertical: i32, mut horizontal: i32) {
         //could cause problems, where file is longer than i32::max/2
-        let mut vertical = max(vertical + self.cursor.0 as i32, 0) as usize;
+        let mut vertical = max(vertical + self.cursor.text_pos.0 as i32, 0) as usize;
         if horizontal < 0 {
             if vertical == 0 {
                 horizontal = 0;
@@ -218,12 +229,12 @@ impl TextBuffer {
                 horizontal = self.buffer[vertical].len() as i32;
             }
         } else {
-            horizontal = horizontal + self.cursor.1 as i32;
+            horizontal = horizontal + self.cursor.text_pos.1 as i32;
         }
         self.move_cursor_absolute(vertical, horizontal as usize);
     }
 
-    pub fn delete(&mut self, start: Option<(usize, usize)>, end: Option<(usize, usize)>) {
+    pub fn delete(&mut self, _start: Option<(usize, usize)>, _end: Option<(usize, usize)>) {
         todo!();
     }
 }
