@@ -30,9 +30,10 @@ pub struct Rect {
 impl Rect {
     /// convert coordinate to normalized
     fn normalize(val: ScreenSize, size: u32) -> f32 {
+        let size = size as i32;
         match val {
             ScreenSize::Normalized(v) => v,
-            ScreenSize::Px(v) => v as f32 / size as f32,
+            ScreenSize::Px(v) => ((v - size / 2) as f32 / (size / 2) as f32) as f32,
         }
     }
     /// convert coordinate to absoluite
@@ -47,9 +48,9 @@ impl Rect {
     pub fn to_noramalized(&self, screen_width: u32, screen_height: u32) -> (f32, f32, f32, f32) {
         (
             Self::normalize(self.x, screen_width),
-            Self::normalize(self.y, screen_height),
+            Self::normalize(self.y, screen_height) * -1.0,
             Self::normalize(self.width, screen_width),
-            Self::normalize(self.height, screen_height),
+            Self::normalize(self.height, screen_height) * -1.0,
         )
     }
     /// returns tuple containing coordinates converted to pixels (x, y, width, height)
@@ -111,7 +112,6 @@ impl ColorRGBA {
 
 /// struct resposible for rendering text and decoration
 pub struct Renderer<'a> {
-    font: Font<'a>,
     cache: Cache<'a>,
     cache_tex: Texture2d,
     /// OpenGL texture used for caching of font
@@ -123,19 +123,12 @@ pub struct Renderer<'a> {
     ps: SyntaxSet,
 }
 
-impl<'a> Renderer<'_> {
+impl<'a> Renderer<'a> {
     pub fn new(win: &window::WindowContext) -> Result<Self, failure::Error> {
         trace!("Initializing syntect");
         let ps = SyntaxSet::load_defaults_newlines();
         let ts = ThemeSet::load_defaults();
         //let _syntax = ps.find_syntax_by_extension("rs").unwrap();
-
-        trace!("Loading font \"/usr/share/fonts/TTF/Hack-Regular.ttf\"");
-        let font_path = std::env::current_dir()
-            .unwrap()
-            .join("/usr/share/fonts/TTF/Hack-Regular.ttf");
-        let data = std::fs::read(&font_path).unwrap();
-        let font = Font::try_from_vec(data).unwrap();
 
         trace!("Initializing gpu font cache");
         let scale = win.display.gl_window().window().scale_factor();
@@ -224,7 +217,6 @@ void main() {
 
         Ok(Self {
             ps,
-            font,
             cache,
             cache_tex,
             text_program,
@@ -295,31 +287,30 @@ void main() {
         x: f32,
         y: f32,
         width_factor: f32,
-        height_factor: f32,
         scale: f32,
         disp: &Display,
-        buff: &TextBuffer,
+        buff: &mut TextBuffer<'a>,
     ) {
         let mut target = disp.draw();
+        target.clear_color(1.0, 1.0, 1.0, 1.0);
+        let rect = Rect {
+            x: ScreenSize::Px(10),
+            y: ScreenSize::Px(10),
+            width: ScreenSize::Px(20),
+            height: ScreenSize::Px(20),
+        };
+        let col = ColorRGBA::new().from_8bit(255, 0, 0, 255);
+        self.draw_rect(&rect, &col, disp, &mut target);
+        self.draw_cursor(buff, disp, &mut target);
         self.draw_text(
             x,
             y,
             width_factor,
-            height_factor,
             scale,
             disp,
             buff,
             &mut target,
         );
-        let rect = Rect {
-            x: ScreenSize::Normalized(0.0),
-            y: ScreenSize::Normalized(0.0),
-            width: ScreenSize::Normalized(0.25),
-            height: ScreenSize::Normalized(0.25),
-        };
-        let col = ColorRGBA::new().from_8bit(255, 0, 0, 255);
-        self.draw_rect(&rect, &col, scale, disp, buff, &mut target);
-        self.draw_cursor(buff, scale as u32, scale, disp, &mut target);
         target.finish().unwrap();
     }
 
@@ -331,23 +322,20 @@ void main() {
         x: f32,
         y: f32,
         width_factor: f32,
-        height_factor: f32,
         scale: f32,
         disp: &Display,
-        buff: &TextBuffer,
+        buff: &TextBuffer<'a>,
         target: &mut Frame,
     ) {
         //get size of window
-        let (mut width, mut height): (f32, f32) = disp.gl_window().window().inner_size().into();
-        height = height_factor * height;
-        let height = height.ceil() as u32;
+        let (mut width, _): (f32, f32) = disp.gl_window().window().inner_size().into();
         width = width_factor * width;
         let width = width.ceil() as u32;
 
         let scale_dis = disp.gl_window().window().scale_factor() as f32;
 
         let glyphs = self.layout_paragraph(
-            &self.font,
+            &buff.font,
             Scale::uniform(scale * scale_dis),
             width,
             &buff.buffer,
@@ -457,7 +445,6 @@ void main() {
             glium::VertexBuffer::new(disp, &vertices).unwrap()
         };
 
-        target.clear_color(1.0, 1.0, 1.0, 1.0);
         target
             .draw(
                 &vertex_buffer,
@@ -476,18 +463,12 @@ void main() {
         &mut self,
         rect: &Rect,
         color: &ColorRGBA,
-        scale: f32,
         disp: &Display,
-        buff: &TextBuffer,
         target: &mut Frame,
     ) {
         //get size of window
-        let (mut width, mut height): (f32, f32) = disp.gl_window().window().inner_size().into();
-        let (x, y, width_factor, height_factor) =
-            rect.to_noramalized(width.ceil() as u32, height.ceil() as u32);
-        let scale_dis = disp.gl_window().window().scale_factor() as f32;
-        height = height_factor * scale_dis;
-        width = width_factor * scale_dis;
+        let (width, height): (f32, f32) = disp.gl_window().window().inner_size().into();
+        let (x, y, width, height) = rect.to_noramalized(width.ceil() as u32, height.ceil() as u32);
 
         let vertex_buffer = {
             #[derive(Copy, Clone)]
@@ -497,11 +478,6 @@ void main() {
             }
 
             implement_vertex!(Vertex, position, color);
-            let (screen_width, screen_height) = {
-                let (w, h) = disp.get_framebuffer_dimensions();
-                (w as f32, h as f32)
-            };
-            let origin = point(x, y);
             let verts: Vec<Vertex> = vec![
                 Vertex {
                     position: [x, y],
@@ -549,33 +525,29 @@ void main() {
             .unwrap();
     }
 
-    fn draw_cursor(&mut self, buff: &TextBuffer, size: u32,
-        scale: f32,
+    fn draw_cursor(
+        &mut self,
+        buff: &mut TextBuffer,
         disp: &Display,
         target: &mut Frame,
     ) {
-        let ( scr_width,  scr_height): (f32, f32) = disp.gl_window().window().inner_size().into();
-        let scr_width = (scr_width) as i32;
-        let scr_height = (scr_height) as i32;
-        let x = buff.cursor.text_pos.1 as i32 * size as i32 - scr_width;
-        let y = scr_height - buff.cursor.text_pos.0 as i32 * size as i32 * 2;
-        let width = x + scale as i32 ;
-        let height = y - scale as i32 * 2;
+        let (width, height): (f32, f32) = disp.gl_window().window().inner_size().into();
 
+        buff.cursor
+            .calc_screen_pos(&buff.font, &buff.buffer, width as i32, height as i32);
+        let x = (buff.cursor.screen_pos.0 + 1.0) * (width / 2.0);
+        let y = (1.0 - buff.cursor.screen_pos.1) * (height / 2.0);
+        let width = x + buff.cursor.width;
+        let height = y + buff.cursor.height;
 
-        let x = buff.cursor.screen_pos.1 * size as f32;
-        let y = buff.cursor.screen_pos.0 * size as f32;
-        let x = x as i32;
-        let y = y as i32;
-        let width = buff.cursor.screen_width as i32;
+        let rect = Rect {
+            x: ScreenSize::Px(x as i32),
+            y: ScreenSize::Px(y as i32),
+            width: ScreenSize::Px(width as i32),
+            height: ScreenSize::Px(height as i32),
+        };
 
-        let rect = Rect{
-            x: ScreenSize::Px(x),
-            y: ScreenSize::Px(y),
-            width: ScreenSize::Px(width),
-            height: ScreenSize::Px(height),
-};
         let col = ColorRGBA::new();
-        self.draw_rect(&rect, &col, scale, disp, buff, target);
+        self.draw_rect(&rect, &col, disp, target);
     }
 }

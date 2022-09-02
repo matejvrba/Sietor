@@ -1,10 +1,11 @@
+use crate::cursor::Cursor;
+use crate::Position;
+#[allow(unused_imports)]
+use log::{debug, error, info, trace, warn};
 use rusttype::Font;
 use std::cmp::{max, min};
 use std::fs;
 use std::io::Read;
-use crate::cursor::{Cursor, Position};
-#[allow(unused_imports)]
-use log::{debug, error, info, trace, warn};
 
 #[cfg(test)]
 mod tests {
@@ -15,21 +16,21 @@ mod tests {
 
     #[test]
     fn test_new_buffer() {
-        let buff = TextBuffer::new(BufferOrigin::Empty, None, None);
+        let buff = TextBuffer::new(BufferOrigin::Empty, None, None, 1.0);
         assert_eq!(buff.buffer, Vec::<String>::new());
         assert_eq!(buff.cursor.text_pos, (0, 0));
         assert_eq!(buff.view_pos, (0, 0));
         assert!(buff.file.is_none());
         assert_eq!(buff.buffer_type, BufferType::Clear);
         assert!(buff.file.is_none());
-        let buff = TextBuffer::new(BufferOrigin::Empty, Some((1, 2)), Some((3, 4)));
+        let buff = TextBuffer::new(BufferOrigin::Empty, Some((1, 2)), Some((3, 4)),1.0);
         assert_eq!(buff.cursor.text_pos, (1, 2));
         assert_eq!(buff.view_pos, (3, 4));
-        let buff = TextBuffer::new(BufferOrigin::Buffer("test".to_string()), None, None);
+        let buff = TextBuffer::new(BufferOrigin::Buffer("test".to_string()), None, None, 1.0);
         assert_eq!(buff.buffer, vec!["test".to_string()]);
         match std::fs::File::open("./Cargo.toml") {
             Ok(file) => {
-                let buff = TextBuffer::new(BufferOrigin::File(file), None, None);
+                let buff = TextBuffer::new(BufferOrigin::File(file), None, None, 1.0);
                 assert!(buff.file.is_some());
                 assert_eq!(
                     buff.buffer[0],
@@ -115,7 +116,7 @@ pub struct TextBuffer<'a> {
     pub cursor: Cursor,
     pub view_pos: (usize, usize),
     pub file: Option<fs::File>,
-    font: Font<'a>,
+    pub font: Font<'a>,
 }
 
 impl TextBuffer<'_> {
@@ -123,12 +124,10 @@ impl TextBuffer<'_> {
         buffer: BufferOrigin,
         cursor: Option<(usize, usize)>,
         view_pos: Option<(usize, usize)>,
+        screen_scale: f32,
     ) -> Self {
-
-        trace!("Loading font \"/usr/share/fonts/TTF/Hack-Regular.ttf\"");
-        let font_path = std::env::current_dir()
-            .unwrap()
-            .join("/usr/share/fonts/TTF/Hack-Regular.ttf");
+        trace!("Loading font \"./Hack-Regular.ttf\"");
+        let font_path = std::env::current_dir().unwrap().join("./Hack-Regular.ttf");
         let data = std::fs::read(&font_path).unwrap();
         let font = Font::try_from_vec(data).unwrap();
         let mut buf = TextBuffer {
@@ -139,9 +138,11 @@ impl TextBuffer<'_> {
             file: None,
             font,
         };
+        buf.cursor.screen_scale =  screen_scale;
 
         if let Some((row, col)) = cursor {
-            buf.cursor.move_to(Position::Absolute(row), Position::Absolute(col), &buf.buffer, &buf.font);
+            buf.cursor
+                .move_to(Position::Absolute(row), Position::Absolute(col));
         }
         if let Some((row, col)) = view_pos {
             buf.view_pos.0 = row;
@@ -169,8 +170,13 @@ impl TextBuffer<'_> {
         return buf;
     }
 
+    /// Inserts char at cursor position or `pos` position if specified
+    /// if `pos` is not specified moves cursor 1 position to the right
+    /// `pos` is `(row, col)`.
     pub fn insert(&mut self, ch: char, pos: Option<(usize, usize)>) {
-        let (mut row, mut col) =  self.cursor.text_pos;
+        let (mut row, mut col) = self.cursor.text_pos;
+
+        col = min(col, self.buffer[row].len());
 
         if let Some((r, c)) = pos {
             row = r;
@@ -184,13 +190,32 @@ impl TextBuffer<'_> {
                 self.buffer[row] = right.to_string();
                 self.buffer.insert(row, left.to_string());
                 if let None = pos {
-                    self.cursor.move_to(Position::Relative(1), Position::Absolute(0), &self.buffer, &self.font);
+                    self.cursor
+                        .move_to(Position::Relative(1), Position::Absolute(0));
                 }
             }
             _ => {
-                self.buffer[row].insert(col, ch);
+                let mut new_str = String::new();
+                let mut i: usize = 0;
+                if col <= self.buffer[row].len(){
+                loop {
+                    if i == col {
+                        new_str.push(ch);
+                    }
+                    if let Some(ch) = self.buffer[row].chars().nth(i) {
+                        new_str.push(ch);
+                    } else {
+                        break;
+                    }
+                    i += 1;
+                }
+                self.buffer[row] = new_str;
+                }else{
+                    self.buffer[row].push(ch);
+                }
                 if let None = pos {
-                    self.cursor.move_to(Position::Absolute(0), Position::Relative(1), &self.buffer, &self.font)
+                    self.cursor
+                        .move_to(Position::Relative(0), Position::Relative(1))
                 }
             }
         }
@@ -200,41 +225,71 @@ impl TextBuffer<'_> {
     /// cursor is first moved vertically and then horizontaly, if horizontal
     /// move is past the end of line, it continues on the next line(except for
     /// the end of file, where is stops)
-    pub fn move_cursor_absolute(&mut self, vertical: usize, mut horizontal: usize) {
-        let mut row = min(vertical, self.buffer.len() - 1);
-        let mut col: usize = 0;
-        let mut line_len = self.buffer[row].len();
-        while line_len < horizontal {
-            if self.buffer.len() - 1 == row {
-                col = line_len;
-                return;
-            }
-            horizontal -= line_len + 1;
-            row += 1;
-            line_len = self.buffer[row].len();
-        }
-        col = horizontal;
-        self.cursor.move_to(Position::Absolute(row), Position::Absolute(col), &self.buffer, &self.font)
+    pub fn move_cursor_absolute(&mut self, vertical: usize, horizontal: usize) {
+        let  row = min(vertical, self.buffer.len() - 1);
+        let  col = horizontal;
+        self.cursor
+            .move_to(Position::Absolute(row), Position::Absolute(col))
     }
 
     /// sets cursor to relative x and y to current position or to the beginning/end of line/buffer
-    pub fn move_cursor_relative(&mut self, vertical: i32, mut horizontal: i32) {
+    pub fn move_cursor_relative(&mut self, vertical: i32, horizontal: i32) {
         //could cause problems, where file is longer than i32::max/2
-        let mut vertical = max(vertical + self.cursor.text_pos.0 as i32, 0) as usize;
-        if horizontal < 0 {
-            if vertical == 0 {
-                horizontal = 0;
-            } else {
-                vertical -= 1;
-                horizontal = self.buffer[vertical].len() as i32;
-            }
-        } else {
-            horizontal = horizontal + self.cursor.text_pos.1 as i32;
+        let mut new_vertical = max(vertical + self.cursor.text_pos.0 as i32, 0) as usize;
+        let mut new_horizontal = horizontal + self.cursor.text_pos.1 as i32;
+
+        if new_vertical >= self.buffer.len(){
+            new_vertical = self.buffer.len()-1;
         }
-        self.move_cursor_absolute(vertical, horizontal as usize);
+
+        if new_horizontal < 0 {
+            if new_vertical != 0{
+                new_vertical -=1;
+                new_horizontal = self.buffer[new_vertical].len() as i32;
+            }else{
+                new_horizontal = 0;
+            }
+        }else if new_horizontal > self.buffer[new_vertical].len() as i32{
+            if new_vertical as usize == self.buffer.len() -1{
+                new_horizontal = self.buffer[new_vertical].len() as i32;
+            }else{
+                if vertical == 0{
+
+                new_horizontal = 0;
+                new_vertical+=1;
+                }
+            }
+        }
+        let horizontal = new_horizontal as usize;
+        let vertical = new_vertical;
+
+
+
+
+        self.move_cursor_absolute(vertical, horizontal);
     }
 
+    //TODO start and end
     pub fn delete(&mut self, _start: Option<(usize, usize)>, _end: Option<(usize, usize)>) {
-        todo!();
+        let ( row, mut col) = self.cursor.text_pos;
+        if row == 0 && col == 0{
+            return;
+        }
+
+        if _start.is_some() || _end.is_some(){
+            todo!();
+        }
+
+
+        col = min(col, self.buffer[row].len());
+        self.move_cursor_relative(0, -1);
+        if col != 0{
+            self.buffer[row].remove(col-1);
+        }else{
+            let mut tmp = self.buffer[row-1].clone();
+            tmp.push_str(self.buffer[row].as_str());
+            self.buffer[row-1] =tmp;
+            self.buffer.remove(row);
+        }
     }
 }
