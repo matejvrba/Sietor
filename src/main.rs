@@ -3,7 +3,7 @@ extern crate render_derive;
 extern crate failure;
 extern crate image;
 extern crate nalgebra;
-extern crate vec_2_10_10_10;
+//extern crate vec_2_10_10_10;
 use std::env;
 
 use failure::err_msg;

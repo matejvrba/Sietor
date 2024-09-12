@@ -6,7 +6,7 @@ use log::{debug, error, info, trace, warn};
 use rusttype::gpu_cache::Cache;
 use rusttype::{point, vector, Font, PositionedGlyph, Scale};
 use std::borrow::Cow;
-use syntect::highlighting::ThemeSet;
+use syntect::highlighting::{ThemeSet, Highlighter};
 use syntect::parsing::SyntaxSet;
 
 /// Intented to represent size on screen, can be either normalized (e.g. 0.0 is
@@ -119,7 +119,8 @@ pub struct Renderer<'a> {
     ///shader for drwaing text
     decor_program: Program,
     ///sjader for drawing solid rectangles
-    ts: ThemeSet,
+    //highlighter: Highlighter<'a>,
+    theme: syntect::highlighting::Theme,
     ps: SyntaxSet,
 }
 
@@ -130,6 +131,7 @@ impl<'a> Renderer<'a> {
         let ts = ThemeSet::load_defaults();
         //let _syntax = ps.find_syntax_by_extension("rs").unwrap();
 
+        let theme = ts.themes["base16-ocean.dark"].clone();
         trace!("Initializing gpu font cache");
         let scale = win.display.gl_window().window().scale_factor();
         let (cache_width, cache_height) = ((512.0 * scale) as u32, (512.0 * scale) as u32);
@@ -221,7 +223,7 @@ void main() {
             cache_tex,
             text_program,
             decor_program,
-            ts,
+            theme,
         })
     }
 
@@ -233,8 +235,9 @@ void main() {
         text: &Vec<String>,
     ) -> Vec<(PositionedGlyph<'a>, syntect::highlighting::Style)> {
         let syntax = self.ps.find_syntax_by_extension("rs").unwrap();
+        let ps = SyntaxSet::load_defaults_newlines();
         let mut highlight =
-            syntect::easy::HighlightLines::new(syntax, &self.ts.themes["InspiredGitHub"]);
+            syntect::easy::HighlightLines::new(syntax, &self.theme);
 
         let mut result = Vec::new();
         let v_metrics = font.v_metrics(scale);
